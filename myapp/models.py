@@ -9,11 +9,36 @@ CATEGORIES = (
 )
 
 MOOD_CHOICES = [
-    ('happy', '😊 행복'),
-    ('sad', '😢 슬픔'),
-    ('angry', '😡 화남'),
-    ('worried', '🤔 고민'),
-    ('diary', '📝 일기')
+    ('joy', '기쁨'),         # 희열, 만족, 감사, 설렘 포함
+    ('sadness', '슬픔'),     # 외로움, 상실감, 후회 포함
+    ('anger', '분노'),       # 짜증, 분개, 억울함 포함
+    ('anxiety', '불안'),     # 두려움, 긴장, 초조 포함
+    ('love', '사랑'),        # 로맨스, 우정, 존경 포함
+    ('neutral', '중립'),     # 감정 없음 또는 평온한 상태
+]
+# 세부 감정
+DETAILED_MOOD_CHOICES = [
+    # 기쁨
+    ('ecstasy', '희열'),
+    ('satisfaction', '만족'),
+    ('gratitude', '감사'),
+    ('excitement', '설렘'),
+    # 슬픔
+    ('loneliness', '외로움'),
+    ('loss', '상실감'),
+    ('regret', '후회'),
+    # 분노
+    ('annoyance', '짜증'),
+    ('rage', '분개'),
+    ('resentment', '억울함'),
+    # 불안
+    ('fear', '두려움'),
+    ('nervousness', '긴장'),
+    ('restlessness', '초조'),
+    # 사랑
+    ('romance', '로맨스'),
+    ('friendship', '우정'),
+    ('respect', '존경'),
 ]
 
 
@@ -31,6 +56,9 @@ class Letters(models.Model):
     category = models.CharField(max_length=20,
                                 choices=CATEGORIES,
                                 default='future')
+    mood = models.CharField(max_length=30, choices=MOOD_CHOICES, null=True, blank=True)
+    detailed_mood = models.CharField(max_length=30, choices=DETAILED_MOOD_CHOICES, blank=True, null=True)
+    analyzed_at = models.DateTimeField(null=True, blank=True)
     # mood = models.CharField(max_length=10, choices=MOOD_CHOICES, default='happy')
 
     def save(self, *args, **kwargs):
@@ -60,6 +88,7 @@ class LetterRoutine(models.Model):
     day_of_month = models.IntegerField(null=True, blank=True)
     time = models.TimeField(null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    emotion = models.CharField(max_length=10, choices=MOOD_CHOICES, null=True, blank=True)
 
     def __str__(self):
         return f"{self.user.username} - {self.routine_type} ({self.day_of_week} {self.time})"
@@ -71,3 +100,4 @@ class SpecialDateRoutine(models.Model):
 
     def __str__(self):
         return f"{self.user.username} - {self.name} ({self.date})"
+    

@@ -2,7 +2,10 @@ import json
 from django.shortcuts import render,get_object_or_404
 
 # Create your views here.
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
 import openai
+import requests
 from django.contrib.auth import logout, authenticate, login
 from django.contrib.auth.decorators import login_required
 from django.shortcuts import redirect
@@ -12,10 +15,39 @@ from django.shortcuts import render
 from collections import Counter  
 # from django.db.models import Count
 from myapp.models import Letters
-from .models import Profile, UserProfile
+from .models import Feedback, Profile, UserProfile, RecommendationFeedback
 import os
 from dotenv import load_dotenv
+from django.utils.timezone import now
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework.response import Response
+from commons.utils.emotion import analyze_emotion_for_letter
+from django.views.decorators.http import require_POST
+from django.http import JsonResponse
 
+
+
+
+
+@csrf_exempt
+def login_view(request):
+    print("🛠 login_view 호출됨")  # ✅ 무조건 호출 여부 확인
+
+    if request.method == "POST":
+        print("🔑 POST 요청 수신됨")
+        username = request.POST.get('username')
+        password = request.POST.get('password')
+
+        user = authenticate(request, username=username, password=password)
+        if user is not None:
+            print(f"✅ 로그인 성공: {user.username}")
+            login(request, user)
+            return redirect('/')
+        else:
+            print("❌ 로그인 실패: 인증 실패")
+            return render(request, 'commons/login.html', {'error': '아이디 또는 비밀번호가 틀렸습니다.'})
+    
+    return render(request, 'commons/login.html')
 
 def logout_view(request):
     logout(request)
@@ -27,8 +59,8 @@ def signup(request):
         if form.is_valid():
             user = form.save()  # ✅ 사용자 저장 후, 반환된 객체 사용
 
-            profile = Profile.objects.create(user=user)  # 새로운 Profile 객체 생성
-            UserProfile.objects.create(user=user, profile=profile)  # 새로운 UserProfile 객체 생성 및 연결
+            Profile.objects.create(user=user)  # 새로운 Profile 객체 생성
+            UserProfile.objects.get_or_create(user=user)  # 새로운 UserProfile 객체 생성 및 연결
 
             login(request, user)  # ✅ 자동 로그인
             return redirect('/')  # ✅ 회원가입 후 홈으로 이동
@@ -46,127 +78,232 @@ load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def reanalyze_all_emotions(request):
+    user = request.user
+    letters = Letters.objects.filter(user=user)
 
-def analyze_emotion(letters):
-    """사용자가 작성한 편지를 감정 분석하여 감정을 반환"""
-    emotion_list = []
+    for letter in letters:
+        analyze_emotion_for_letter(letter)
 
-    try:
-        for letter in letters:
-            response = openai.ChatCompletion.create(
-                model="gpt-4o",
-                messages=[
-                    {"role": "system", "content": "너는 감정을 분석하는 AI야. 사용자가 쓴 여러 편지를 문맥과 단어 등을 고려하여 분석하고 감정을 무조건 happy, sad, angry, worried, neutral 중 하나로 나타내주세요"},
-                    {"role": "user", "content": letter.content}
-                ],
-                max_tokens=7
-            )
-            emotion = response.choices[0].message.content.strip().lower()
-            print(f"[분석된 감정] 편지 내용: {letter.content[:20]}... → 감정: {emotion}")  # ✅ 로그 출력
-            emotion_list.append(emotion)
-    except openai.error.RateLimitError:
-            return ["현재 감정 분석 기능이 제한되어 있습니다. 나중에 다시 시도해주세요."]
-  # ✅ 감정별 횟수 딕셔너리 반환
-    emotion_counts = dict(Counter(emotion_list))
-    return emotion_counts
+ # 분석이 끝난 후 마이페이지로 리디렉션
+    return redirect("commons:mypage")   
 
 
-def generate_comforting_message(emotion):
-    """감정에 맞는 위로의 말 생성"""
+@api_view(["POST"])
+def generate_comforting_message(request):
+    """상위 감정(mood)에 맞는 위로의 말 생성"""
+
+    mood = request.data.get("mood") or request.data.get("emotion")   # '기쁨', '슬픔' 등
+
     comfort_prompts = {
-        "happy": "기분이 좋다니 정말 다행이에요! \n 당신의 행복이 오래 지속되기를 바라요. \n 당신의 기분이 오래 지속될 수 있도록 영화와 노래 추천을 해드릴게요!",
-        "sad": "오늘 힘든 하루였군요. \n 저는 당신을 응원하고 있어요. \n당신은 혼자가 아니에요.",
-        "angry": "화가 날 수도 있어요. \n하지만 깊게 호흡하고 긍정적인 방향으로 생각해보는 건 어떨까요?",
-        "worried": "걱정이 많을 땐 작은 것부터 해결해 나가는 것이 중요해요.\n 천천히 하나씩 정리해봐요.",
-        "diary": "어떤 감정이든 괜찮아요. \n오늘도 수고 많았어요!"
+        "기쁨": "당신의 행복한 순간을 함께 나눌 수 있어 기뻐요. 그 기쁨이 오래 지속되길 바라요!",
+        "슬픔": "슬픈 날에는 울어도 괜찮아요. 당신의 감정을 있는 그대로 받아들여 주세요. 저는 당신을 응원해요.",
+        "분노": "화나는 감정을 느끼는 건 당연해요. 잠시 숨을 고르고, 천천히 생각을 정리해봐요.",
+        "불안": "불안한 마음은 누구에게나 찾아와요. 당신은 잘 해내고 있어요. 천천히, 차분히 앞으로 나아가요.",
+        "사랑": "사랑하는 마음은 참 소중해요. 그 따뜻한 마음이 더 많은 사람에게 전해지기를 바라요.",
+        "중립": "감정이 특별히 떠오르지 않는 날도 있어요. 그런 날엔 그저 편안함 속에 머물러도 좋아요."
     }
-    return comfort_prompts.get(emotion, "당신의 감정을 이해하고 싶어요. 좀 더 이야기해 줄 수 있나요?")
 
-def recommend_movies_and_music(emotion):
+    message = comfort_prompts.get(mood, "당신의 감정을 이해하고 싶어요. 편하게 이야기해 주세요.")
+    return Response({"comfort_message": message})
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def recommend_movies_and_music(request):
     """감정에 따라 적절한 영화와 음악을 추천하는 함수"""
+    most_frequent_mood = request.data.get("most_frequent_mood")
+
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content": f"너는 감정을 기반으로 영화를 추천하는 AI야. '{emotion}' 감정을 가진 사람에게 추천할 만한 대한민국이나 외국 영화 3개와 음악 3개의 제목과 관련 태그 정보를 알려주세요. 영화와 노래의 문단을 줄바꿈으로 나누고, 한 줄에 하나씩 적어주세요."},
+                {
+                    "role": "system",
+                    "content": (
+                        f"'{most_frequent_mood}' 감정을 가진 사람에게 추천할 "
+                        f"대한민국 또는 외국 영화 3편과 음악 3곡을 각각 구분된 문단(예: '### 영화 추천' / '### 음악 추천') 아래에 항목별로 나열해줘. "
+                        f"항목은 '제목 - 태그1, 태그2' 형식으로 한 줄씩 작성해줘. 중복 없이 제공해줘."
+                    ),
+                },
             ],
-            max_tokens=250
+            max_tokens=600
         )
-        return response.choices[0].message.content
+
+        raw_text = response.choices[0].message.content
+
+        # ✅ 사용자의 dislike 항목 가져오기
+        from commons.models import Feedback
+        disliked_titles = set(
+            Feedback.objects.filter(user=request.user, feedback="dislike")
+            .values_list("item_title", flat=True)
+        )
+
+        # ✅ 추천 라인 필터링
+        lines = raw_text.strip().splitlines()
+        filtered_lines = [
+            line for line in lines
+            if not any(disliked_title.strip() in line for disliked_title in disliked_titles)
+        ]
+
+        cleaned_text = "\n".join(filtered_lines)
+
+        return Response({"recommendations": cleaned_text})
+
     except openai.error.RateLimitError:
-        return "현재 추천 기능이 제한되어 있습니다. 나중에 다시 시도해주세요."
+        return Response({"error": "현재 추천 기능이 제한되어 있습니다. 나중에 다시 시도해주세요."}, status=429)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def user_emotion_summary(request):
+    user = request.user
+    letters = Letters.objects.filter(user=user)
+
+    emotion_list = [letter.mood for letter in letters if letter.mood]
+    detailed_list = [letter.detailed_mood for letter in letters if letter.detailed_mood]  
+
+    from collections import Counter
+    emotion_counts = dict(Counter(emotion_list))
+    detailed_counts = dict(Counter(detailed_list))
+
+    most_frequent_mood = max(emotion_counts.items(), key=lambda x: x[1])[0] if emotion_counts else None
+    most_frequent_detailed_mood = max(detailed_counts.items(), key=lambda x: x[1])[0] if detailed_counts else None
+
+    BASE_URL = "http://127.0.0.1:8000/commons"
+    csrf_token = request.COOKIES.get('csrftoken')
+    headers = {
+        'X-CSRFToken': csrf_token,
+        'Content-Type': 'application/json'
+    }
+
+    # ✅ comfort_message 요청은 단 한 번, 예외도 전체 감싸기
+    try:
+        if most_frequent_mood:
+            msg_res = requests.post(
+                f"{BASE_URL}/api/emotions/message/",
+                headers=headers,
+                json={"mood": most_frequent_mood}
+            )
+            comfort_message = msg_res.json().get("comfort_message", "감정 기반 메시지를 찾을 수 없습니다.")
+        else:
+            comfort_message = "감정이 분석되지 않았습니다. 편지를 먼저 작성해보세요."
+    except Exception as e:
+        print("❌ comfort message 오류:", e)
+        comfort_message = "감정 기반 메세지를 불러올 수 없습니다."
+
+    # ✅ 추천 API 호출
+    try:
+        recommend_res = requests.post(
+            f"{BASE_URL}/api/recommendations/emotion-based/",
+            headers=headers,
+            cookies=request.COOKIES
+        )
+        recommendations = recommend_res.json().get("recommendations", "추천 결과를 찾을 수 없습니다.")
+    except Exception as e:
+        print("❌ 추천 오류:", e)
+        recommendations = "추천 결과를 불러올 수 없습니다."
+
+    return Response({
+        "emotions": emotion_counts,
+        "most_frequent_mood": most_frequent_mood,
+        "most_frequent_detailed_mood": most_frequent_detailed_mood,
+        "comfort_message": comfort_message,
+        "recommendations": recommendations,
+    })
 
 
 @login_required
 def mypage(request):
-    """사용자가 작성한 편지를 감정 분석하고 위로의 말과 추천 영화/음악을 반환하는 API"""
-    
-     # ✅ 프로필 정보 최신 상태로 가져오기
-    profile, _ = Profile.objects.get_or_create(user=request.user)
-    user_profile, _ = UserProfile.objects.get_or_create(user=request.user)
-
-
-    # 1. 편지 가져오기
-    letters = Letters.objects.filter(user=request.user)
-
-    # 2. 감정 분석 결과: ['happy', 'sad', 'happy', ...]
-    emotions = analyze_emotion(letters)
-
-    # 실패 여부 체크
-    is_emotion_failed = emotions and any("제한되어 있습니다" in e for e in emotions)
-
-
-    # 감정 분석 실패 여부에 따라 처리 분기
-    if is_emotion_failed:
-        most_frequent_mood = None
-        comfort_message = emotions[0]
-        recommendations = "영화/음악 추천도 사용할 수 없습니다."
-        mood_counts = []  # 차트용 데이터도 비워줘야 함
-    else:
-        mood_counts = Counter(emotions) #감정 빈도 계산
-        most_frequent_mood = mood_counts.most_common(1)[0][0] if mood_counts else None
-        comfort_message = generate_comforting_message(most_frequent_mood)
-        recommendations = recommend_movies_and_music(most_frequent_mood)
-
-
-    # # 사용자의 모든 편지 불러오기
-    # user_letters = Letters.objects.filter(user=request.user).order_by("-created_at")
-    # # 감정별 편지 개수 계산 (통계)
-    #mood_counts = user_letters.values("mood").annotate(count=Count("mood")).order_by("-count")
-
-    # # 가장 많이 나타난 감정 확인
-    # most_frequent_mood = order_mood_counts[0]["response"] if mood_counts else None
-
-    # 감정에 따른 위로 메시지 및 추천 영화/음악 생성
-    if most_frequent_mood:
-        comfort_message = generate_comforting_message(most_frequent_mood)
-        recommendations = recommend_movies_and_music(most_frequent_mood)
-    else:
-        comfort_message = "아직 감정 분석된 편지가 없습니다."
-        recommendations = "편지를 작성하면 감정 분석 후 추천 영화와 음악을 제공해 드립니다."
-        
-    
     user = request.user
-    letter_count = user.letters.count()  # related_name을 활용
+    # 🔗 내부 API 통합 호출
+    BASE_URL = "http://127.0.0.1:8000/commons"  # 배포 시 도메인으로 변경
+    try:
+        response = requests.get(
+            f"{BASE_URL}/api/user/emotion-summary/",
+            cookies=request.COOKIES  # 세션 인증 유지
+        )
+        if response.status_code == 200:
+            data = response.json()
+            emotions = data.get("emotions", {})
+            most_frequent_mood = data.get("most_frequent_mood")
+            most_frequent_detailed_mood = data.get("most_frequent_detailed_mood")  # ✅ 추가
+            comfort_message = data.get("comfort_message")
+            recommendations = data.get("recommendations")
+        else:
+            emotions = {}
+            most_frequent_mood = None
+            comfort_message = "감정 메시지를 불러오지 못했습니다."
+            recommendations = "추천 결과를 불러오지 못했습니다."
+    except Exception as e:
+        emotions = {}
+        most_frequent_mood = None
+        comfort_message = "감정 메시지를 불러오지 못했습니다."
+        recommendations = "추천 결과를 불러오지 못했습니다."
+    # 사용자 정보
+    profile, _ = Profile.objects.get_or_create(user=user)
+    user_profile, _ = UserProfile.objects.get_or_create(user=user)
+    letter_count = user.letters.count()
     routine_count = user.routines.count()
 
-    print("닉네임:", profile.nickname)
-    print("소개:", profile.bio)
+    # # 1. 편지 가져오기
+    # letters = Letters.objects.filter(user=request.user)
+
+    #  # 감정 분석 결과 저장 (최대 1회만 실행)
+    # emotions = analyze_emotion_api(request)
+
+   
+
+    # # 실패 여부 체크
+    # is_emotion_failed = emotions and any("제한되어 있습니다" in e for e in emotions)
+
+
+    # # 감정 분석 실패 여부에 따라 처리 분기
+    # if is_emotion_failed:
+    #     most_frequent_mood = None
+    #     comfort_message = emotions[0]
+    #     recommendations = "영화/음악 추천도 사용할 수 없습니다."
+    #     mood_counts = []  # 차트용 데이터도 비워줘야 함
+    # else:
+    #     mood_counts = Counter(emotions) #감정 빈도 계산
+    #     most_frequent_mood = mood_counts.most_common(1)[0][0] if mood_counts else None
+    #     comfort_message = generate_comforting_message(most_frequent_mood)
+    #     recommendations = recommend_movies_and_music(most_frequent_mood)
+
+
+   
+    # # 감정에 따른 위로 메시지 및 추천 영화/음악 생성
+    # if most_frequent_mood:
+    #     comfort_message = generate_comforting_message(most_frequent_mood)
+    #     recommendations = recommend_movies_and_music(most_frequent_mood)
+    # else:
+    #     comfort_message = "아직 감정 분석된 편지가 없습니다."
+    #     recommendations = "편지를 작성하면 감정 분석 후 추천 영화와 음악을 제공해 드립니다."
+        
+    
+    # user = request.user
+    # letter_count = user.letters.count()  # related_name을 활용
+    # routine_count = user.routines.count()
+
+    # print("닉네임:", profile.nickname)
+    # print("소개:", profile.bio)
     # Django 템플릿으로 데이터 전달
     context = {
-        "user": request.user,
+        "user": user,
         "user_profile": user_profile,
-        "profile" : profile,
-        "user_profile": user_profile,
-        #"user_letters": user_letters,  # 사용자의 모든 편지 리스트
+        "profile": profile,
         "emotions": json.dumps(emotions),
-        "mood_counts": mood_counts,  # 감정 통계 데이터
-        "is_emotion_failed": is_emotion_failed,
-        "most_frequent_mood": most_frequent_mood,  # 가장 많이 나타난 감정
-        "comfort_message": comfort_message,  # 위로 메시지
-        "recommendations": recommendations, # 추천 영화 & 음악
-        'letter_count': letter_count,
-        'routine_count':routine_count
+        "mood_counts": emotions,
+        "most_frequent_mood": most_frequent_mood,
+        "most_frequent_detailed_mood": most_frequent_detailed_mood,
+        "comfort_message": comfort_message,
+        "recommendations": recommendations,
+        "letter_count": letter_count,
+        "routine_count": routine_count,
+        "recommendation_lines": recommendations.splitlines() if recommendations else [],
+
     }
 
     return render(request, 'commons/mypage.html', context)
@@ -202,3 +339,18 @@ def update_profile(request):
         'user_profile': user_profile
     }
     return render(request, 'commons/update_profile.html', context)
+
+@require_POST
+@login_required
+def save_feedback(request):
+    item_title = request.POST.get("item_title")
+    item_type = request.POST.get("item_type")
+    feedback = request.POST.get("feedback")
+
+    Feedback.objects.update_or_create(
+        user=request.user,
+        item_title=item_title,
+        item_type=item_type,
+        defaults={"feedback": feedback}
+    )
+    return JsonResponse({"message": f"{'좋아요' if feedback == 'like' else '별로예요'}로 저장되었습니다."})

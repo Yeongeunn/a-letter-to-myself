@@ -9,8 +9,11 @@ from django.contrib.auth import authenticate, login, logout
 from django.shortcuts import render, redirect
 from django.core.paginator import Paginator
 from django.views.decorators.csrf import csrf_exempt
+from commons.utils.emotion import analyze_emotion_for_letter
 from datetime import datetime, timedelta
-
+import openai
+import os
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # Create your views here.
 def home(request):
@@ -25,6 +28,7 @@ def write_letter(request):
             letter.user = request.user  # 🔥 작성자를 현재 로그인한 사용자로 설정
             letter.category = 'future' # 기본적으로 미래 카테고리로 분류
             letter.save()
+            analyze_emotion_for_letter(letter)
             return redirect('letter_list')  # 편지 목록 페이지로 이동
     else:
         form = LetterForm()
@@ -47,8 +51,7 @@ def letter_list(request):
             letter.category = 'future'
         else:
             letter.category = 'past'
-    
-    letter.save()  # ✅ DB에 저장!
+        letter.save()  # ✅ DB에 저장!
 
 
     return render(request, 'myapp/letter_list.html', {
@@ -116,30 +119,8 @@ def save_routine(request):
 
     return render(request, "myapp/routine.html", lists)
 
-   
-def login_view(request):
-    if request.method == "POST":
-        username = request.POST['username']
-        password = request.POST['password']
-        user = authenticate(request, username=username, password=password)
-        if user is not None:
-            login(request, user)
-            return redirect('index')  # 로그인 후 홈으로 이동
-    return render(request, 'commons/login.html')
 
-def signup(request):
-    if request.method == "POST":
-        form = UserForm(request.POST)
-        if form.is_valid():
-            form.save()
-            username = form.cleaned_data.get('username')
-            raw_password = form.cleaned_data.get('password1')
-            user = authenticate(username=username, password=raw_password)  # 사용자 인증
-            login(request, user)  # 로그인
-            return redirect('index')
-    else:
-        form = UserForm()
-    return render(request, 'commons/signup.html', {'form': form})
+
 
 
 WEEKDAYS = {
